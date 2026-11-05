@@ -6,3 +6,5 @@ captures/
 .claude/
 # saved third-party pages and PDFs (FCC exhibits, forum threads); not ours to republish
 docs/reference/
+# shared out-of-band (email), never commit
+tools/erlang_cookie.json
