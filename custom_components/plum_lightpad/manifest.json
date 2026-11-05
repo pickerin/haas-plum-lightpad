@@ -1,0 +1,10 @@
+{
+  "domain": "plum_lightpad",
+  "name": "Plum Lightpad",
+  "codeowners": [],
+  "documentation": "https://github.com/pickerin/haas-plum-lightpad",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/pickerin/haas-plum-lightpad/issues",
+  "requirements": [],
+  "version": "0.0.1"
+}

@@ -1,0 +1,6 @@
+__pycache__/
+.DS_Store
+# packet captures, firmware images, anything holding tokens or WiFi passphrases
+captures/
+# local Claude Code state
+.claude/
