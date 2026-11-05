@@ -65,6 +65,23 @@ BLE_PROVISIONABLE = "0000baab-0000-1000-8000-00805f9b34fb"
 
 # ---------------------------------------------------------------- state ----
 
+def confirm_typed(word, what):
+    """Require the user to type `word` exactly (case-insensitive) to proceed."""
+    got = input(f"Type {word} to {what} (anything else cancels): ").strip().lower()
+    if got != word.lower():
+        print("Cancelled.")
+        return False
+    return True
+
+
+DANGEROUS_WORDS = ("reset", "factory", "wipe", "erase", "delete", "remove", "format")
+
+
+def looks_destructive(text):
+    t = text.lower()
+    return any(w in t for w in DANGEROUS_WORDS)
+
+
 def load_state():
     try:
         with open(STATE_FILE) as f:
@@ -956,6 +973,9 @@ class Shell(cmd.Cmd):
         if not parts:
             print("usage: raw <route> [json]")
             return
+        if looks_destructive(parts[0]) and not confirm_typed(
+                "factoryreset", f"call the destructive-looking route '{parts[0]}'"):
+            return
         print(f"Calling /v2/{parts[0]} exactly as typed -- this may change things if it is a "
               "'set...' route.", flush=True)
         body = {"lpid": self.cur.uuid}
@@ -1073,6 +1093,9 @@ class Shell(cmd.Cmd):
             asyncio.run(_ble_send(addr, [{"method": "POST", "request": "level",
                                           "level": int(rest[0])}], 3.0))
         elif sub == "send" and rest:
+            if looks_destructive(" ".join(rest)) and not confirm_typed(
+                    "factoryreset", "send this destructive-looking command"):
+                return
             print("Connecting over Bluetooth and sending your JSON as-is (~8 s) ...", flush=True)
             asyncio.run(_ble_send(addr, [json.loads(" ".join(rest))], 4.0))
         else:
@@ -1084,8 +1107,7 @@ class Shell(cmd.Cmd):
               "  - it reboots into recovery and rewrites its own firmware from its stored\n"
               "    recovery image; allow SEVERAL MINUTES, do not cut the power meanwhile\n"
               "  - afterwards it is a blank pad: run the guide's option 1 to give it Wi-Fi")
-        if input("Type RESET to continue (anything else cancels): ").strip() != "RESET":
-            print("Cancelled.")
+        if not confirm_typed("factoryreset", "wipe this pad"):
             return
         print(f"Sending the reset command over Bluetooth to {addr} ...", flush=True)
         asyncio.run(_ble_send(addr, [{"method": "POST", "request": "resetToFactoryDefaults"}], 5.0))
@@ -1321,29 +1343,41 @@ class Shell(cmd.Cmd):
     def _flow_need_token(self, pad):
         print("\nThis pad was linked to Plum's cloud and refuses commands without its old "
               "'house token'.")
-        if load_cookie():
+        have_cookie = bool(load_cookie())
+        while have_cookie:
             print("I'll try to read that token straight from the pad over the LAN "
                   "(read-only).", flush=True)
             if self._token_fetch():
                 return self._control_menu()
-            print("\nCouldn't get access that way.")
+            n = self._ask("Couldn't get the token. A wrong cookie is one cause, but so are a busy "
+                          "or rebooting pad and network trouble -- none of which a wipe fixes.", [
+                "Try again",
+                "Stop here (check the cookie file / the pad's network, then run the guide again)",
+                "Go to the factory reset (WIPES the pad)"])
+            if n == 1:
+                continue
+            if n != 3:
+                return
+            break
         else:
             print("To read it from the pad I need the shared cookie file:\n"
                   f"  {COOKIE_FILE}\n"
                   "Ask whoever gave you this tool for it, save it there "
                   "as {\"cookie\": \"...\"}, and run the guide again.")
-        n = self._ask("What now?", [
-            "Factory-reset the pad over Bluetooth (wipes it, token included, then set it up again)",
-            "Stop here (expert shell: 'token <value>' if you do have the token)"])
-        if n == 1:
-            if _need_bleak() is None:
+            n = self._ask("What now?", [
+                "Factory-reset the pad over Bluetooth (wipes it, token included, then set it "
+                "up again)",
+                "Stop here (expert shell: 'token <value>' if you do have the token)"])
+            if n != 1:
                 return
-            print("\nTouch and HOLD the pad's glass ~3 s, then continue.")
-            input("Press Enter when you're ready ... ")
-            self.ble_found = []
-            addr = self._ble_target()
-            if addr:
-                self._ble_factory_reset(addr)
+        if _need_bleak() is None:
+            return
+        print("\nTouch and HOLD the pad's glass ~3 s, then continue.")
+        input("Press Enter when you're ready ... ")
+        self.ble_found = []
+        addr = self._ble_target()
+        if addr:
+            self._ble_factory_reset(addr)
 
     def _control_menu(self):
         while True:
