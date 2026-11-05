@@ -40,13 +40,17 @@ Nothing here is reversible if skipped, so do it first.
    way onto WiFi for used pads (experiment E2).
 5. Mirror the community repos listed in REQUIREMENTS section 10 into your own GitHub
    account. The original plum-probe repo has already disappeared.
-6. Read the Reddit thread by hand (it is blocked for automated tools) and retry the
-   Wayback captures listed in REQUIREMENTS section 11. Save the FCC user manual and
+6. Retry the Wayback captures listed in REQUIREMENTS section 11 (the Reddit thread has
+   been read). Save the FCC user manual and
    internal photos PDFs from fccid.io/2AFB9P1000 into `docs/reference/` for the bench.
    Direct links:
    - manual: https://fccid.io/m/7de64906834b8c0d3fc2c47378313149799779d0aa83314a71f40c054c394ac9.pdf
    - internal photos: https://fccid.io/m/470b82be98fa6e53b7d4e1be2f512afcad2d38df8fcd874f127251b8596076eb.pdf
    - WiFi test report: https://fccid.io/m/9e78f075519907f69792788edab8727843039a301041e4c4aa9e5a412ddbf973.pdf
+6a. Ask the people who have already been inside one. GitHub user ohmantics (fork of
+   plum-probe) reported the microSD/Linux/Erlang layout and may still have a card image
+   or notes; that would save a teardown. The authors of the repos in REQUIREMENTS
+   section 10 are the other candidates.
 7. Check whether the Plum app is still installable: the iOS "Purchased" list on the
    original Apple ID, and any Android APK archive. A copy of the app is the single best
    source for the BLE protocol (E7).
@@ -133,8 +137,11 @@ project. Do not write to any characteristic yet.
 What the FCC internal photos already tell us (REQUIREMENTS section 4): the main board
 carries a Freescale i.MX28-family processor with 128 MB of DDR2, a micro-USB connector
 (J1), a 3-pin header (J6), a 2-pin header (J5), a 2x3 pad header and a tactile
-pushbutton. No card socket is recognisable in those photos, so the microSD report is
-unconfirmed.
+pushbutton. No card socket is recognisable in those photos, but a user who opened a
+unit reports a microSD card inside holding an unencrypted Linux install whose software
+is mostly Erlang. Finding and imaging that card is the first goal of this experiment.
+The same report says the enclosure is not designed to be opened, so expect to damage
+clips on the first unit.
 
 Safety first: do not assume the logic side is isolated from mains. Never connect USB or a
 serial adapter between the board and a computer while the pad is wired to mains. Work

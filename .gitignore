@@ -4,3 +4,5 @@ __pycache__/
 captures/
 # local Claude Code state
 .claude/
+# saved third-party pages and PDFs (FCC exhibits, forum threads); not ours to republish
+docs/reference/

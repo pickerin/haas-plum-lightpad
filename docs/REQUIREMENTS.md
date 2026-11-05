@@ -35,8 +35,15 @@ Every claim below carries one of these tags. Do not promote a claim without new 
 - Kickstarter funded 2013-04-04 (1,308 backers, $307,600). Units reached backers around January 2016. Retail $99. [D]
 - FCC ID 2AFB9P1000, model P1000, grantee Ube, Inc., granted 2015-08-12, described as
   "Light Pad Dimmer with 802.11b/g/n, Bluetooth Low Energy". [D]
-- Company and cloud are gone. Reddit thread "Plumlife is dead" dates from early 2020; the
-  cloud host was `production.plum.technology`. [U - thread body not readable from this environment]
+- Company and cloud are gone; the cloud host was `production.plum.technology`. Timeline
+  from the Reddit thread "Plumlife is dead" (early 2020): the website was down, the app
+  had been pulled from the App Store, and the installed app refused to launch. One
+  commenter put the company's disappearance about a year earlier. Some months after the
+  post, owners reported that Alexa control and the iOS app stopped together (app error
+  "Unable to Apply Scene, Server failed to process request"), which is when the cloud
+  went dark. Control at the switch kept working. [U - forum reports]
+- One owner reported a Lightpad that "de-registered" on its own while the cloud was
+  failing, so a provisioned pad's state is not guaranteed to have survived. [U]
 - Home Assistant shipped a core `plum_lightpad` integration (library `plumlightpad==0.0.11`).
   It was removed in core PR #153590, merged 2025-10-04. Core still carries a tombstone
   integration under the same domain that only raises a "removed" repair issue. [C]
@@ -63,14 +70,15 @@ Every claim below carries one of these tags. Do not promote a claim without new 
 | Glow ring | RGBW LED ring around the pad, any color, dimmable | [C] |
 | Motion | PIR sensor, sensitivity adjustable, range up to about 6 ft | [C] |
 | Energy | Built-in metering, reports whole watts | [C] |
-| Storage | Not identified. The plum-probe/openHAB author lists "dead microSD cards" as a common failure, but no card socket is recognisable in the FCC photos (a July 2015 sample, serial 1600019). Candidates in the photos are 8-pin flash-sized parts. The i.MX28 can boot from SD/MMC, NAND or SPI flash | [U] settle by opening a unit, see PLAN E6 |
+| Storage | A microSD card inside the unit, holding an unencrypted Linux install. First-hand report from a GitHub/Reddit user (ohmantics, who also forked plum-probe) who had one open; a second author separately lists "dead microSD cards" as a common failure. The socket is not recognisable in the FCC photos (a July 2015 sample), so its location is still to be found | [U] two independent reports, not yet seen by us. See PLAN E6 |
+| Operating system | Linux, with the application software "mostly Erlang" (same first-hand report). Consistent with the i.MX28 processor and with the `amqpEnabled` config key, since the common AMQP broker and clients are Erlang | [U] |
+| Enclosure | "Not designed to be opened" (same report). Expect clips or adhesive, not screws | [U] |
 | WiFi/BLE chipset | Not identified. Candidates in the photo: a shielded part marked "R 192549 / 5123" and an unmarked QFN of about 48 pins | [U] |
-| Operating system | Not stated anywhere. Embedded Linux is the likely fit for this processor and RAM | [U] |
 | Multi-way | Any number of Lightpads per load. Before provisioning only the "Primary" switch controls the light; "Auxiliary" switches do not until provisioned. Pads talk to each other over WiFi | [D] |
 | Multi-way wiring | Inference: the Auxiliary is not wired to the load and relays to the Primary over WiFi | [U] |
 
-Still not found: the radio chipset, the boot storage, what the headers and the pushbutton
-do, and firmware version history. The FCC schematics, block diagrams, parts list and
+Still not found: the radio chipset, where the card socket sits, what the headers and the
+pushbutton do, and firmware version history. The FCC schematics, block diagrams, parts list and
 operating descriptions exist but are held confidential.
 
 Two things follow from the processor. The i.MX28 boot ROM has a USB recovery mode, and
@@ -144,8 +152,8 @@ All confirmed by several independent implementations.
 | A10 | Firmware updates (`versionLocked`) | Out of scope unless firmware work becomes necessary |
 
 The 2016-era product had no public API and no hub or voice-assistant support. [D]
-Later Amazon store copy mentions control "by voice"; whatever provided that ran in the
-cloud and is gone. [M]
+Later an Amazon Alexa smart-home integration existed (two owners report using it until
+the cloud went dark). It ran through the Plum cloud and is gone. [U]
 
 ## 6. Protocol reference
 
@@ -379,12 +387,12 @@ not a dependency.
 | fccid.io/2AFB9P1000: grant, user manual (16 pp), internal photos (8 pp), WiFi test report pp 1-7 | Wiring, load ratings, derating, boards and chip markings, BLE-only provisioning statement |
 | Kickstarter page for the Ube dimmer | Marketing only. The 2013 prototype was pitched as 2-wire; an Android app and a third-party API SDK were promised. No hardware detail |
 | Amazon storefront page | One blurb, which mentions schedule and voice control. No specs |
+| reddit.com/r/homeautomation/comments/fptxqf (read from a PDF saved by hand, 2026-11-05) | Shutdown timeline, Alexa integration, the microSD / unencrypted Linux / Erlang report. No reset procedure or workaround |
 
 ## 11. Sources still unread
 
 | Source | Status | Expected value |
 |---|---|---|
-| reddit.com/r/homeautomation/comments/fptxqf | Blocked for both the fetch tool and the browser extension; needs a human read | Shutdown date, what kept working, any reset or workaround tips |
 | web.archive.org/web/20190114015726/http://support.plumlife.com/customer/en/portal/articles/2329344-provisioning-the-lightpad | Capture exists; Wayback playback was offline on 2026-11-05. Retry | Plum's own provisioning article, possibly error codes and reset steps |
 | Other Wayback captures of plumlife.com and support.plumlife.com (2019 index showed only the support home page and the article above; earlier years not yet listed) | Index search was offline. Retry | Factory reset steps, setup error codes, spec sheet |
 | fccid.io/2AFB9P1000 Test Report II (Bluetooth section), Label, External Photos | Not read; low expected value | BLE details, label text |
