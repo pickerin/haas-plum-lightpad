@@ -125,6 +125,7 @@ def _ctx(legacy):
     if legacy:                              # old pad firmware: TLS 1.0/1.1
         c.set_ciphers("ALL:@SECLEVEL=0")
         c.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        c.maximum_version = ssl.TLSVersion.TLSv1_1   # these pads drop clients offering TLS 1.2+
     return c
 
 
@@ -132,6 +133,7 @@ class Pad:
     def __init__(self, uuid, ip, port=8443, token_hash=None, llid=None):
         self.uuid, self.ip, self.port = uuid, ip, port
         self.token_hash, self.llid = token_hash, llid
+        self.last_err = None
         self._conn = None
         self._legacy = False
 
@@ -169,6 +171,7 @@ class Pad:
         """Returns 'none' (no token needed), 'ok' (token accepted),
         'required' (401/403), or 'unreachable'."""
         status, _, err = self.request("getLightpadInfo", {"lpid": self.uuid})
+        self.last_err = err
         if status is None:
             return "unreachable"
         if status in (401, 403):
@@ -864,8 +867,9 @@ class Shell(cmd.Cmd):
             print("  This pad has a cloud house token and rejected us (401/403).\n"
                   "  Give it with:  token <raw-token or sha256-hex>   [then maybe: llid <id>]")
         elif st == "unreachable":
-            print("  Can't reach the pad's HTTPS API. If it's a patched pad it may only "
-                  "accept one LAN IP (port 8443 lock); run this from that machine.")
+            print(f"  Can't reach the pad's HTTPS API: {self.cur.last_err}\n"
+                  "  Pad busy or rebooting? Try again in a few seconds. Only if this keeps "
+                  "happening: a custom image can lock port 8443 to one PC.")
         else:
             print(f"  Unexpected: {st}")
 
@@ -1308,8 +1312,9 @@ class Shell(cmd.Cmd):
         if st == "required":
             return self._flow_need_token(pad)
         if st == "unreachable":
-            print("The pad is on the network but its HTTPS port doesn't answer. If this pad "
-                  "runs a patched image, it may only allow one specific PC (port 8443 lock).")
+            print(f"The pad is on the network but its HTTPS port didn't answer: {pad.last_err}\n"
+                  "Pad busy or rebooting? Try again in a few seconds. Only if this keeps "
+                  "happening: a custom image can lock port 8443 to one PC.")
         else:
             print(f"Unexpected answer: {st}")
 
