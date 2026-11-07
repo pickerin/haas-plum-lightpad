@@ -755,6 +755,55 @@ def threeway_leave(pad, cookie, llid):
     return _threeway_rpc(pad, cookie, "delete", "disassociateWithLogicalLoad", llid)
 
 
+def _orswot_members(x):
+    """Collect pad uuids from a decoded riak_dt ORSWOT entries dict: rows look
+    like [<uuid binary>, ('plum@<uuid>', counter)]."""
+    out = set()
+    if isinstance(x, list):
+        if (len(x) == 2 and isinstance(x[0], bytes) and len(x[0]) == 36
+                and isinstance(x[1], tuple) and x[1] and isinstance(x[1][0], str)
+                and x[1][0].startswith("plum@")):
+            out.add(x[0].decode())
+        else:
+            for i in x:
+                out |= _orswot_members(i)
+    elif isinstance(x, tuple):
+        for i in x:
+            out |= _orswot_members(i)
+    return out
+
+
+def threeway_groups(pad, cookie, timeout=20):
+    """Read-only: the logical-load groups this pad knows -> {llid: [pad uuids]}
+    (groups with no members left are dropped). Reads the pad's replicated
+    plumtree_metadata table {room, logicalload}."""
+    try:
+        conn = Connection.connect(pad.ip, f"plum@{pad.uuid}", cookie,
+                                  my_node="plumctl@threeway", timeout=timeout)
+    except (DistError, OSError) as e:
+        raise ThreeWayError(f"could not reach {pad.uuid[:8]} at {pad.ip}: {e}") from e
+    try:
+        rows = conn.rpc_call("plumtree_metadata", "to_list", [("room", "logicalload")],
+                             timeout=timeout)
+    except DistError as e:
+        raise ThreeWayError(f"RPC to {pad.uuid[:8]} failed: {e}") from e
+    finally:
+        conn.close()
+    if not isinstance(rows, list):
+        raise ThreeWayError(f"{pad.uuid[:8]} could not list its groups: {str(rows)[:120]}")
+    groups = {}
+    for row in rows:
+        if not (isinstance(row, tuple) and len(row) == 2 and isinstance(row[0], bytes)):
+            continue
+        members = set()
+        for sibling in row[1] if isinstance(row[1], list) else []:
+            if isinstance(sibling, tuple) and len(sibling) >= 2:
+                members |= _orswot_members(sibling[1])
+        if members:
+            groups[row[0].decode()] = sorted(members)
+    return groups
+
+
 # ------------------------------------------------------------------- BLE ---
 
 def _need_bleak():
@@ -1433,13 +1482,44 @@ class Shell(cmd.Cmd):
 
     # -- 3-way linking --
     def _links(self):
-        return self.state.setdefault("threeway", {})   # llid -> {"members": [..], "load": uuid}
+        """llid -> {"load": uuid}: which pad is wired to the light (the pads
+        themselves do not record this, so plumctl remembers it)."""
+        return self.state.setdefault("threeway", {})
 
-    def _link_of(self, uuid):
-        for llid, e in self._links().items():
-            if uuid in e.get("members", []):
-                return llid
-        return None
+    def _read_groups(self, first, others, cookie):
+        """Groups with 2+ members, read from `first`; only if that pad cannot be
+        read are the other pads tried (they all hold a copy). -> (groups, problems)."""
+        problems = []
+        for u in [first] + [o for o in others if o != first]:
+            try:
+                g = threeway_groups(self.pads[u], cookie)
+                return {k: set(v) for k, v in g.items() if len(v) >= 2}, problems
+            except ThreeWayError as e:
+                problems.append(str(e))
+        return {}, problems
+
+    def _scan(self):
+        """One UDP discovery. -> uuids that answered now, current pad first."""
+        print("Looking for pads on your network ...", flush=True)
+        found = discover()
+        for uuid, (ip, port) in found.items():
+            if uuid in self.pads:
+                self.pads[uuid].ip, self.pads[uuid].port = ip, port
+            else:
+                self.pads[uuid] = Pad(uuid, ip, port)
+        self.order = list(dict.fromkeys(list(self.pads) + self.order))
+        self._save()
+        live = [u for u in found if u != self.cur.uuid]
+        return [self.cur.uuid] + live
+
+    def _fw_problem(self, pad):
+        """-> (firmware, reason_it_cannot_be_used_or_None); one read-only request."""
+        v, err = pad_firmware(pad)
+        if v is None:
+            return None, f"not reachable ({err})"
+        if v != THREEWAY_FIRMWARE:
+            return v, f"needs firmware {THREEWAY_FIRMWARE}"
+        return v, None
 
     def do_threeway(self, _):
         """threeway -- link two pads on firmware 2.6.10 as a 3-way, or unlink them."""
@@ -1470,42 +1550,61 @@ class Shell(cmd.Cmd):
         elif n == 3:
             self._tw_show()
 
+    def _tw_label(self, members):
+        return " + ".join(u[:8] for u in sorted(members))
+
     def _tw_show(self):
-        links = self._links()
-        if not links:
-            print("No pads linked by plumctl. (A pair made with another tool is not listed.)")
-        for llid, e in links.items():
-            m = e.get("members", [])
-            print(f"  {' + '.join(u[:8] for u in m)}  wired: {e.get('load', '?')[:8]}  group {llid[:8]}...")
+        live = self._scan()
+        groups, problems = self._read_groups(live[0], live[1:], load_cookie())
+        for pr in problems:
+            print(f"  (skipped: {pr})")
+        if not groups and problems:
+            return
+        if not groups:
+            print("No linked pairs found.")
+        for llid, members in groups.items():
+            load = self._links().get(llid, {}).get("load")
+            print(f"  {self._tw_label(members)}   group {llid[:8]}...   "
+                  f"wired: {load[:8] if load else 'unknown'}")
 
     def _tw_link(self):
-        cur = self.cur
+        cur, cookie = self.cur, load_cookie()
         self._tw_head(f"connected to {cur.uuid[:8]} ({cur.ip}) == step 2 of 4")
-        print("Looking for pads on your network ...", flush=True)
-        for uuid, (ip, port) in discover().items():
-            if uuid in self.pads:
-                self.pads[uuid].ip, self.pads[uuid].port = ip, port
-            else:
-                self.pads[uuid] = Pad(uuid, ip, port)
-        self.order = list(dict.fromkeys(list(self.pads) + self.order))
-        self._save()
-        print("Asking each pad for its firmware (read-only, ~4 s each) ...", flush=True)
-        fw, why = {}, {}
-        for u in self.order:
-            fw[u], err = pad_firmware(self.pads[u])
-            if fw[u] is None:
-                why[u] = f"not reachable ({err})"
-            elif fw[u] != THREEWAY_FIRMWARE:
-                why[u] = f"needs firmware {THREEWAY_FIRMWARE}"
-            elif self._link_of(u):
-                why[u] = "already in a pair, unlink it first"
-        if cur.uuid in why:
-            print(f"This pad cannot be linked: {why[cur.uuid]}. Nothing was changed.")
+        live = self._scan()
+        # This pad first: stop early if it cannot take part.
+        print("Checking this pad (read-only) ...", flush=True)
+        fw = {}
+        fw[cur.uuid], reason = self._fw_problem(cur)
+        if reason:
+            print(f"This pad cannot be linked: {reason}. Nothing was changed.")
             return
-        cands = [u for u in self.order if u != cur.uuid and u not in why]
-        for u in self.order:
-            if u != cur.uuid and u in why:
-                print(f"  -) {u[:8]}   {self.pads[u].ip}   fw {fw[u] or '?'}   not available: {why[u]}")
+        groups, problems = self._read_groups(cur.uuid, live[1:], cookie)
+        for pr in problems:
+            print(f"  (could not read groups: {pr})")
+        paired = {}
+        for members in groups.values():
+            for u in members:
+                paired[u] = [o for o in sorted(members) if o != u]
+        if cur.uuid in paired:
+            print(f"This pad cannot be linked: already linked with "
+                  f"{', '.join(o[:8] for o in paired[cur.uuid])}, unlink it first. "
+                  "Nothing was changed.")
+            return
+        # Only pads that answered discovery are checked for firmware.
+        why = {}
+        for u in live[1:]:
+            if u in paired:
+                why[u] = f"already linked with {', '.join(o[:8] for o in paired[u])}, unlink it first"
+                fw[u] = None
+                continue
+            print(f"Checking {u[:8]} (read-only) ...", flush=True)
+            fw[u], reason = self._fw_problem(self.pads[u])
+            if reason:
+                why[u] = reason
+        cands = [u for u in live[1:] if u not in why]
+        for u in live[1:]:
+            if u in why:
+                print(f"  -) {u[:8]}   {self.pads[u].ip}   fw {fw.get(u) or '?'}   not available: {why[u]}")
         if not cands:
             print("No other pad can be linked. Nothing was changed.")
             return
@@ -1534,7 +1633,6 @@ class Shell(cmd.Cmd):
         if not self._yes("Question: link them?", default=False):
             print("Cancelled. Nothing was changed.")
             return
-        cookie = load_cookie()
         llid = __import__("uuid").uuid4().__str__()
         done = []
         try:
@@ -1554,50 +1652,45 @@ class Shell(cmd.Cmd):
                           f"  Use 'threeway' > Unlink later, or reboot the pad.")
             print("Not linked.")
             return
-        self._links()[llid] = {"members": [load.uuid, second.uuid], "load": load.uuid}
+        self._links()[llid] = {"load": load.uuid}
         self._save()
-        print("\nLinked. Checking that the pads agree (best effort) ...", flush=True)
+        print("\nLinked. Checking that each pad reports the group ...", flush=True)
         time.sleep(3)
-        self._tw_verify(llid, [load, second])
-
-    def _tw_verify(self, llid, pads):
-        want, readable = set(p.uuid for p in pads), 0
-        for p in pads:
-            st, d, _ = p.request("getLightpadsOnLogicalLoad", {"llid": llid})
-            ids = None
-            if st == 200 and isinstance(d, list):
-                ids = {x.get("lpid") if isinstance(x, dict) else x for x in d}
-            elif st == 200 and isinstance(d, dict):
-                ids = {x.get("lpid") if isinstance(x, dict) else x
-                       for x in (d.get("lightpads") or d.get("lpids") or [])}
-            if not ids:
-                print(f"  {p.uuid[:8]}: could not read the member list back")
+        want, good = {load.uuid, second.uuid}, True
+        for p in (load, second):
+            try:
+                seen = set(threeway_groups(p, cookie).get(llid, []))
+            except ThreeWayError as e:
+                print(f"  {p.uuid[:8]}: could not check ({e})")
+                good = False
                 continue
-            readable += 1
-            print(f"  {p.uuid[:8]}: members = {', '.join(sorted(i[:8] for i in ids if i))}  "
-                  f"{'ok' if want <= ids else 'DISAGREES'}")
-        if readable == 0:
-            print("The pads did not report the group, so it is unverified. Touch one pad: "
-                  "the other should follow.")
-        else:
-            print("Touch either pad: both should follow.")
+            ok = want <= seen
+            good = good and ok
+            print(f"  {p.uuid[:8]}: members = {', '.join(sorted(i[:8] for i in seen)) or 'none'}  "
+                  f"{'ok' if ok else 'DISAGREES'}")
+        print("Touch either pad: both should follow." if good else
+              "The pads do not agree yet. Wait a few seconds and run 'threeway' > Show, "
+              "or unlink and retry.")
 
     def _tw_unlink(self):
-        links = self._links()
-        if not links:
-            print("No pairs made by plumctl to unlink.")
+        cookie = load_cookie()
+        live = self._scan()
+        groups, problems = self._read_groups(live[0], live[1:], cookie)
+        for pr in problems:
+            print(f"  (could not read groups: {pr})")
+        if not groups:
+            print("No linked pairs found to unlink.")
             return
-        keys = list(links)
+        keys = list(groups)
         n = self._ask("Question: which pair should be unlinked?", [
-            f"{' + '.join(u[:8] for u in links[k]['members'])}   group {k[:8]}..." for k in keys])
+            f"{self._tw_label(groups[k])}   group {k[:8]}..." for k in keys])
         if n is None:
             return
-        llid = keys[n - 1]
-        members = links[llid]["members"]
+        llid, members = keys[n - 1], sorted(groups[keys[n - 1]])
         if not self._yes("Each pad will control only its own switch. Unlink?", default=False):
             print("Cancelled. Nothing was changed.")
             return
-        cookie, left = load_cookie(), []
+        failed = []
         for u in members:
             pad = self.pads.get(u)
             print(f"Removing {u[:8]} ... ", end="", flush=True)
@@ -1608,14 +1701,13 @@ class Shell(cmd.Cmd):
                 print("ok")
             except ThreeWayError as e:
                 print(f"failed\n  {e}")
-                left.append(u)
-        if left:
-            links[llid]["members"] = left
-            print("Not fully unlinked; the pads above are still listed. Try again.")
+                failed.append(u)
+        if failed:
+            print("Not fully unlinked; run 'threeway' > Show to see what is left.")
         else:
-            del links[llid]
+            self._links().pop(llid, None)
+            self._save()
             print("Unlinked.")
-        self._save()
 
     def _control_menu(self):
         while True:
