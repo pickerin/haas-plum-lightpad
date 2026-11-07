@@ -5,6 +5,7 @@
   A) Find pads on the LAN and control them          (discover / use / level ...)
   B) Re-point a pad at a new Wi-Fi network over BLE  (ble wifi)
   C) Control pads with or without a cloud house token (token / llid)
+  D) Link two pads on firmware 2.6.10 as a 3-way     (threeway)
 
 Run with no arguments for a guided wizard (then an expert shell), or pass commands:
     python3 plumctl.py discover
@@ -703,6 +704,57 @@ def rpc_read_token(pad, cookie):
                   + ", ".join(keys) + " -- send me these and enter the token with 'token'")
 
 
+# ------------------------------------------------- 3-way linking (optional) ---
+# Two pads wired to the same light, either switch controls it. Done like the
+# pad's own cloud message addToLogicalLoadGroup: call
+# plumapi:put_command({LPID, associateWithLogicalLoad, LLID}) once on each pad
+# with the same new LLID; the pads share the group between themselves.
+# Only firmware 2.6.10 has that function (2.11.0 keeps groups elsewhere).
+THREEWAY_FIRMWARE = "2.6.10"
+
+
+class ThreeWayError(Exception):
+    pass
+
+
+def pad_firmware(pad):
+    """Read-only: -> (version_text_or_None, error_or_None) from getLightpadInfo."""
+    st, d, err = pad.request("getLightpadInfo", {"lpid": pad.uuid})
+    if st != 200 or not isinstance(d, dict):
+        return None, err or f"HTTP {st}"
+    rel = d.get("permanent_release")
+    rel = rel if isinstance(rel, dict) else {}
+    v = rel.get("version") or d.get("version")
+    return (str(v) if v else None), None
+
+
+def _threeway_rpc(pad, cookie, fun, verb, llid, timeout=25):
+    try:
+        conn = Connection.connect(pad.ip, f"plum@{pad.uuid}", cookie,
+                                  my_node="plumctl@threeway", timeout=timeout)
+    except (DistError, OSError) as e:
+        raise ThreeWayError(f"could not reach {pad.uuid[:8]} at {pad.ip}: {e}") from e
+    arg = etf_tuple([etf_binary(pad.uuid.encode()), etf_atom(verb), etf_binary(llid.encode())])
+    try:
+        res = conn.rpc_call("plumapi", fun, [Raw(arg)], timeout=timeout)
+    except DistError as e:
+        raise ThreeWayError(f"RPC to {pad.uuid[:8]} failed: {e}") from e
+    finally:
+        conn.close()
+    if isinstance(res, tuple) and len(res) == 2 and res[0] == "badrpc":
+        raise ThreeWayError(f"{pad.uuid[:8]} refused the request (firmware without 3-way "
+                            f"support?): {res[1]}")
+    return res
+
+
+def threeway_join(pad, cookie, llid):
+    return _threeway_rpc(pad, cookie, "put_command", "associateWithLogicalLoad", llid)
+
+
+def threeway_leave(pad, cookie, llid):
+    return _threeway_rpc(pad, cookie, "delete", "disassociateWithLogicalLoad", llid)
+
+
 # ------------------------------------------------------------------- BLE ---
 
 def _need_bleak():
@@ -1379,12 +1431,199 @@ class Shell(cmd.Cmd):
         if addr:
             self._ble_factory_reset(addr)
 
+    # -- 3-way linking --
+    def _links(self):
+        return self.state.setdefault("threeway", {})   # llid -> {"members": [..], "load": uuid}
+
+    def _link_of(self, uuid):
+        for llid, e in self._links().items():
+            if uuid in e.get("members", []):
+                return llid
+        return None
+
+    def do_threeway(self, _):
+        """threeway -- link two pads on firmware 2.6.10 as a 3-way, or unlink them."""
+        try:
+            self._threeway()
+        except (EOFError, KeyboardInterrupt):
+            print("\n(cancelled)")
+
+    def _tw_head(self, step):
+        print(f"\n== 3-way link == {step} ==")
+
+    def _threeway(self):
+        if not self._need_pad():
+            return
+        if not load_cookie():
+            print("No Erlang cookie found, and linking talks to the pads directly.\n"
+                  f"  Looked for: {COOKIE_FILE}\n  See 'help token' for how to provide it.\n"
+                  "Nothing was changed.")
+            return
+        self._tw_head(f"connected to {self.cur.uuid[:8]} ({self.cur.ip}) == step 1 of 4")
+        print("3-way: two pads wired to the same light, either switch controls it.")
+        n = self._ask("Question: what would you like to do?", [
+            "Link this pad with another pad", "Unlink a pair", "Show which pads are linked"])
+        if n == 1:
+            self._tw_link()
+        elif n == 2:
+            self._tw_unlink()
+        elif n == 3:
+            self._tw_show()
+
+    def _tw_show(self):
+        links = self._links()
+        if not links:
+            print("No pads linked by plumctl. (A pair made with another tool is not listed.)")
+        for llid, e in links.items():
+            m = e.get("members", [])
+            print(f"  {' + '.join(u[:8] for u in m)}  wired: {e.get('load', '?')[:8]}  group {llid[:8]}...")
+
+    def _tw_link(self):
+        cur = self.cur
+        self._tw_head(f"connected to {cur.uuid[:8]} ({cur.ip}) == step 2 of 4")
+        print("Looking for pads on your network ...", flush=True)
+        for uuid, (ip, port) in discover().items():
+            if uuid in self.pads:
+                self.pads[uuid].ip, self.pads[uuid].port = ip, port
+            else:
+                self.pads[uuid] = Pad(uuid, ip, port)
+        self.order = list(dict.fromkeys(list(self.pads) + self.order))
+        self._save()
+        print("Asking each pad for its firmware (read-only, ~4 s each) ...", flush=True)
+        fw, why = {}, {}
+        for u in self.order:
+            fw[u], err = pad_firmware(self.pads[u])
+            if fw[u] is None:
+                why[u] = f"not reachable ({err})"
+            elif fw[u] != THREEWAY_FIRMWARE:
+                why[u] = f"needs firmware {THREEWAY_FIRMWARE}"
+            elif self._link_of(u):
+                why[u] = "already in a pair, unlink it first"
+        if cur.uuid in why:
+            print(f"This pad cannot be linked: {why[cur.uuid]}. Nothing was changed.")
+            return
+        cands = [u for u in self.order if u != cur.uuid and u not in why]
+        for u in self.order:
+            if u != cur.uuid and u in why:
+                print(f"  -) {u[:8]}   {self.pads[u].ip}   fw {fw[u] or '?'}   not available: {why[u]}")
+        if not cands:
+            print("No other pad can be linked. Nothing was changed.")
+            return
+        n = self._ask(f"Question: which pad should be linked with {cur.uuid[:8]}?", [
+            f"{u[:8]}   {self.pads[u].ip}   fw {fw[u]}   not linked" for u in cands])
+        if n is None:
+            return
+        other = self.pads[cands[n - 1]]
+        self._tw_head(f"{cur.uuid[:8]} + {other.uuid[:8]} == step 3 of 4")
+        print("In a 3-way only one pad has the light wired to it. The other is just a\n"
+              "second switch. Shared settings are read from the wired pad.")
+        w = self._ask("Question: which pad is wired to the light?", [
+            f"{cur.uuid[:8]}  ({cur.ip})   the pad you are connected to",
+            f"{other.uuid[:8]}  ({other.ip})"])
+        if w is None:
+            return
+        load, second = (cur, other) if w == 1 else (other, cur)
+        self._tw_head(f"{cur.uuid[:8]} + {other.uuid[:8]} == step 4 of 4")
+        print(f"About to link these two pads as one light:\n\n"
+              f"  wired to the light   {load.uuid[:8]}   {load.ip}   fw {fw[load.uuid]}\n"
+              f"  second switch        {second.uuid[:8]}   {second.ip}   fw {fw[second.uuid]}\n\n"
+              "What happens:\n  - Both pads join one shared group (a new random id).\n"
+              "  - Touching either pad changes the light on both.\n"
+              "  - The light itself does not change now.\n"
+              "  - You can undo this from the same menu.\n")
+        if not self._yes("Question: link them?", default=False):
+            print("Cancelled. Nothing was changed.")
+            return
+        cookie = load_cookie()
+        llid = __import__("uuid").uuid4().__str__()
+        done = []
+        try:
+            for p in (load, second):
+                print(f"Joining {p.uuid[:8]} to group {llid[:8]}... ", end="", flush=True)
+                threeway_join(p, cookie, llid)
+                done.append(p)
+                print("ok")
+        except ThreeWayError as e:
+            print(f"failed\n{e}")
+            for p in done:
+                try:
+                    threeway_leave(p, cookie, llid)
+                    print(f"Rolled back {p.uuid[:8]}.")
+                except ThreeWayError as e2:
+                    print(f"Could not roll back {p.uuid[:8]}: {e2}\n"
+                          f"  Use 'threeway' > Unlink later, or reboot the pad.")
+            print("Not linked.")
+            return
+        self._links()[llid] = {"members": [load.uuid, second.uuid], "load": load.uuid}
+        self._save()
+        print("\nLinked. Checking that the pads agree (best effort) ...", flush=True)
+        time.sleep(3)
+        self._tw_verify(llid, [load, second])
+
+    def _tw_verify(self, llid, pads):
+        want, readable = set(p.uuid for p in pads), 0
+        for p in pads:
+            st, d, _ = p.request("getLightpadsOnLogicalLoad", {"llid": llid})
+            ids = None
+            if st == 200 and isinstance(d, list):
+                ids = {x.get("lpid") if isinstance(x, dict) else x for x in d}
+            elif st == 200 and isinstance(d, dict):
+                ids = {x.get("lpid") if isinstance(x, dict) else x
+                       for x in (d.get("lightpads") or d.get("lpids") or [])}
+            if not ids:
+                print(f"  {p.uuid[:8]}: could not read the member list back")
+                continue
+            readable += 1
+            print(f"  {p.uuid[:8]}: members = {', '.join(sorted(i[:8] for i in ids if i))}  "
+                  f"{'ok' if want <= ids else 'DISAGREES'}")
+        if readable == 0:
+            print("The pads did not report the group, so it is unverified. Touch one pad: "
+                  "the other should follow.")
+        else:
+            print("Touch either pad: both should follow.")
+
+    def _tw_unlink(self):
+        links = self._links()
+        if not links:
+            print("No pairs made by plumctl to unlink.")
+            return
+        keys = list(links)
+        n = self._ask("Question: which pair should be unlinked?", [
+            f"{' + '.join(u[:8] for u in links[k]['members'])}   group {k[:8]}..." for k in keys])
+        if n is None:
+            return
+        llid = keys[n - 1]
+        members = links[llid]["members"]
+        if not self._yes("Each pad will control only its own switch. Unlink?", default=False):
+            print("Cancelled. Nothing was changed.")
+            return
+        cookie, left = load_cookie(), []
+        for u in members:
+            pad = self.pads.get(u)
+            print(f"Removing {u[:8]} ... ", end="", flush=True)
+            try:
+                if pad is None:
+                    raise ThreeWayError("pad not known; run 'discover'")
+                threeway_leave(pad, cookie, llid)
+                print("ok")
+            except ThreeWayError as e:
+                print(f"failed\n  {e}")
+                left.append(u)
+        if left:
+            links[llid]["members"] = left
+            print("Not fully unlinked; the pads above are still listed. Try again.")
+        else:
+            del links[llid]
+            print("Unlinked.")
+        self._save()
+
     def _control_menu(self):
         while True:
             n = self._ask(f"What now? (pad {self.cur.uuid[:8]} at {self.cur.ip})", [
                 "Turn on (full)", "Turn off", "Set a brightness (0-255)",
-                "Show info", "Show configuration", "Expert shell (type 'help')"])
-            if n is None or n == 6:
+                "Show info", "Show configuration", "Link or unlink 3-way pads",
+                "Expert shell (type 'help')"])
+            if n is None or n == 7:
                 return
             if n == 1:
                 print("Setting the light to full brightness ...")
@@ -1397,6 +1636,8 @@ class Shell(cmd.Cmd):
                 self.do_info("")
             elif n == 5:
                 self.do_config("")
+            elif n == 6:
+                self.do_threeway("")
 
 
 def main():
